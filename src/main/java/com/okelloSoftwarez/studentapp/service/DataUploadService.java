@@ -37,6 +37,11 @@ public class DataUploadService {
         Files.copy(file.getInputStream(), tempFile, StandardCopyOption.REPLACE_EXISTING);
         log.info("Uploaded CSV saved temporarily at: {}", tempFile);
 
+        // CLEAR TABLE before inserting fresh data
+        log.info("Clearing existing student records from database...");
+        studentRepository.deleteAll();
+        log.info("Table cleared. Starting fresh upload...");
+
         int totalSaved = 0;
 
         // STEP 2: Open the CSV file for reading

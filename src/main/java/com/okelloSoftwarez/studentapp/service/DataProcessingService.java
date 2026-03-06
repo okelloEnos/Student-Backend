@@ -1,17 +1,30 @@
 package com.okelloSoftwarez.studentapp.service;
 
 import com.opencsv.CSVWriter;
-import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.openxml4j.opc.OPCPackage;
+import org.apache.poi.xssf.eventusermodel.XSSFReader;
+import org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler;
+import org.apache.poi.xssf.eventusermodel.XSSFSheetXMLHandler.SheetContentsHandler;
+import org.apache.poi.xssf.model.SharedStrings;
+import org.apache.poi.xssf.model.StylesTable;
+import org.apache.poi.xssf.usermodel.XSSFComment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
+import org.xml.sax.ContentHandler;
+import org.xml.sax.InputSource;
+import org.xml.sax.XMLReader;
 
+import javax.xml.parsers.SAXParser;
+import javax.xml.parsers.SAXParserFactory;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.List;
 
 @Service
 public class DataProcessingService {
@@ -21,142 +34,159 @@ public class DataProcessingService {
     @Value("${app.storage.base-path}")
     private String basePath;
 
-    public String processExcelToCsv(MultipartFile file) throws IOException {
+    public String processExcelToCsv(MultipartFile file) throws Exception {
 
-        // STEP 1: Save the uploaded file temporarily to disk
-        // We need it on disk to open it as an Excel workbook
+        // ------------------------------------------------
+        // STEP 1: Save uploaded file temporarily
+        // ------------------------------------------------
         Path tempFile = Files.createTempFile("upload_", ".xlsx");
         Files.copy(file.getInputStream(), tempFile, StandardCopyOption.REPLACE_EXISTING);
+        log.info("Uploaded Excel saved temporarily at: {}", tempFile);
 
-        log.info("Uploaded Excel file saved temporarily at: {}", tempFile);
-
-        // STEP 2: Build the CSV output file path
+        // ------------------------------------------------
+        // STEP 2: Prepare CSV output path
+        // ------------------------------------------------
         File dir = new File(basePath);
-        if (!dir.exists()) {
+        if (!dir.exists())
             dir.mkdirs();
-        }
 
         String csvFileName = "students_processed_" + System.currentTimeMillis() + ".csv";
         String csvFilePath = basePath + File.separator + csvFileName;
-
         log.info("CSV output will be saved to: {}", csvFilePath);
 
-        // STEP 3: Open Excel file and write to CSV
-        try (
-                // Open the Excel file for reading
-                Workbook workbook = WorkbookFactory.create(tempFile.toFile());
+        // ------------------------------------------------
+        // STEP 3: Open CSV writer
+        // ------------------------------------------------
+        try (CSVWriter csvWriter = new CSVWriter(new FileWriter(csvFilePath))) {
 
-                // Open the CSV file for writing
-                CSVWriter csvWriter = new CSVWriter(new FileWriter(csvFilePath))) {
-            // Get the first sheet
-            Sheet sheet = workbook.getSheetAt(0);
-
-            // Get total rows for logging
-            int totalRows = sheet.getLastRowNum();
-            log.info("Total rows in Excel (including header): {}", totalRows);
-
-            // STEP 4: Write CSV header row first
-            String[] csvHeader = {
+            // Write header first
+            csvWriter.writeNext(new String[] {
                     "studentId", "firstName", "lastName", "DOB", "class", "score"
-            };
-            csvWriter.writeNext(csvHeader);
+            });
 
-            // STEP 5: Loop through each row
-            // Start at 1 to SKIP the header row (row 0)
-            int processedCount = 0;
+            // ------------------------------------------------
+            // STEP 4: Use SAX streaming reader — reads row
+            // by row without loading whole file into memory
+            // ------------------------------------------------
+            try (OPCPackage opcPackage = OPCPackage.open(tempFile.toFile())) {
 
-            for (int i = 1; i <= sheet.getLastRowNum(); i++) {
-                Row row = sheet.getRow(i);
+                XSSFReader xssfReader = new XSSFReader(opcPackage);
+                SharedStrings sharedStrings = xssfReader.getSharedStringsTable();
+                StylesTable stylesTable = xssfReader.getStylesTable();
 
-                // Skip if row is completely empty
-                if (row == null) {
-                    continue;
+                // Our custom handler that processes each row
+                RowHandler rowHandler = new RowHandler(csvWriter, log);
+
+                ContentHandler handler = new XSSFSheetXMLHandler(
+                        stylesTable, sharedStrings, rowHandler, false);
+
+                SAXParserFactory factory = SAXParserFactory.newInstance();
+                factory.setNamespaceAware(true);
+                SAXParser parser = factory.newSAXParser();
+                XMLReader reader = parser.getXMLReader();
+                reader.setContentHandler(handler);
+
+                // Read first sheet only
+                XSSFReader.SheetIterator sheets = (XSSFReader.SheetIterator) xssfReader.getSheetsData();
+
+                if (sheets.hasNext()) {
+                    try (InputStream sheetStream = sheets.next()) {
+                        reader.parse(new InputSource(sheetStream));
+                    }
                 }
 
-                // STEP 6: Read all 6 columns from the Excel row
-
-                // studentId — numeric
-                String studentId = getCellValueAsString(row.getCell(0));
-
-                // firstName — string
-                String firstName = getCellValueAsString(row.getCell(1));
-
-                // lastName — string
-                String lastName = getCellValueAsString(row.getCell(2));
-
-                // DOB — date stored as string
-                String dob = getCellValueAsString(row.getCell(3));
-
-                // class — string
-                String studentClass = getCellValueAsString(row.getCell(4));
-
-                // score — numeric, ADD 10 before saving
-                double originalScore = row.getCell(5) != null
-                        ? row.getCell(5).getNumericCellValue()
-                        : 0;
-                int newScore = (int) originalScore + 10;
-
-                // STEP 7: Write the row to CSV
-                String[] csvRow = {
-                        studentId,
-                        firstName,
-                        lastName,
-                        dob,
-                        studentClass,
-                        String.valueOf(newScore)
-                };
-                csvWriter.writeNext(csvRow);
-
-                processedCount++;
-
-                // Log progress every 100,000 rows
-                if (processedCount % 100_000 == 0) {
-                    log.info("Processed {} / {} rows", processedCount, totalRows);
-                }
+                log.info("CSV processing complete. Total rows written: {}",
+                        rowHandler.getRowCount());
             }
-
-            log.info("CSV processing complete. Total rows written: {}", processedCount);
         }
 
-        // STEP 8: Delete the temporary Excel file
+        // ------------------------------------------------
+        // STEP 5: Delete temp file
+        // ------------------------------------------------
         Files.deleteIfExists(tempFile);
         log.info("Temporary file deleted");
 
-        // STEP 9: Return the CSV file path
         return csvFilePath;
     }
 
-    // HELPER METHOD: Read any cell as a String
-    // regardless of its type (number, string, date etc)
-    private String getCellValueAsString(Cell cell) {
-        if (cell == null) {
-            return "";
+    // ================================================
+    // INNER CLASS: Handles each row from the SAX reader
+    // ================================================
+    private static class RowHandler implements SheetContentsHandler {
+
+        private final CSVWriter csvWriter;
+        private final Logger log;
+
+        // Tracks current row data
+        private String[] currentRow = new String[6];
+        private int currentRowNum = -1;
+        private int rowCount = 0;
+
+        public RowHandler(CSVWriter csvWriter, Logger log) {
+            this.csvWriter = csvWriter;
+            this.log = log;
         }
 
-        switch (cell.getCellType()) {
-            case NUMERIC:
-                // Check if it's a date cell
-                if (DateUtil.isCellDateFormatted(cell)) {
-                    return cell.getLocalDateTimeCellValue()
-                            .toLocalDate()
-                            .toString();
+        @Override
+        public void startRow(int rowNum) {
+            currentRowNum = rowNum;
+            currentRow = new String[] { "", "", "", "", "", "" };
+        }
+
+        @Override
+        public void endRow(int rowNum) {
+            // Skip header row (row 0)
+            if (rowNum == 0)
+                return;
+
+            try {
+                // Add 10 to score (column index 5)
+                if (currentRow[5] != null && !currentRow[5].isEmpty()) {
+                    double score = Double.parseDouble(currentRow[5]);
+                    currentRow[5] = String.valueOf((int) score + 10);
                 }
-                // Otherwise it's a plain number
-                // Use long to avoid decimals on whole numbers
-                return String.valueOf((long) cell.getNumericCellValue());
 
-            case STRING:
-                return cell.getStringCellValue().trim();
+                csvWriter.writeNext(currentRow);
+                rowCount++;
 
-            case BOOLEAN:
-                return String.valueOf(cell.getBooleanCellValue());
+                if (rowCount % 100_000 == 0) {
+                    log.info("Processed {} rows", rowCount);
+                }
 
-            case FORMULA:
-                return cell.getCellFormula();
+            } catch (Exception e) {
+                log.warn("Skipping row {}: {}", rowNum, e.getMessage());
+            }
+        }
 
-            case BLANK:
-            default:
-                return "";
+        @Override
+        public void cell(String cellReference, String formattedValue,
+                XSSFComment comment) {
+            // Get column index from cell reference (A=0, B=1, C=2...)
+            int colIndex = getColIndex(cellReference);
+            if (colIndex >= 0 && colIndex < 6) {
+                currentRow[colIndex] = formattedValue != null
+                        ? formattedValue
+                        : "";
+            }
+        }
+
+        // Convert column letter to index e.g. A→0, B→1, F→5
+        private int getColIndex(String cellRef) {
+            if (cellRef == null)
+                return -1;
+            int col = 0;
+            for (char c : cellRef.toCharArray()) {
+                if (Character.isLetter(c)) {
+                    col = col * 26 + (Character.toUpperCase(c) - 'A' + 1);
+                } else {
+                    break;
+                }
+            }
+            return col - 1;
+        }
+
+        public int getRowCount() {
+            return rowCount;
         }
     }
 }
