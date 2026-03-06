@@ -36,16 +36,12 @@ public class DataProcessingService {
 
     public String processExcelToCsv(MultipartFile file) throws Exception {
 
-        // ------------------------------------------------
         // STEP 1: Save uploaded file temporarily
-        // ------------------------------------------------
         Path tempFile = Files.createTempFile("upload_", ".xlsx");
         Files.copy(file.getInputStream(), tempFile, StandardCopyOption.REPLACE_EXISTING);
         log.info("Uploaded Excel saved temporarily at: {}", tempFile);
 
-        // ------------------------------------------------
         // STEP 2: Prepare CSV output path
-        // ------------------------------------------------
         File dir = new File(basePath);
         if (!dir.exists())
             dir.mkdirs();
@@ -54,9 +50,7 @@ public class DataProcessingService {
         String csvFilePath = basePath + File.separator + csvFileName;
         log.info("CSV output will be saved to: {}", csvFilePath);
 
-        // ------------------------------------------------
         // STEP 3: Open CSV writer
-        // ------------------------------------------------
         try (CSVWriter csvWriter = new CSVWriter(new FileWriter(csvFilePath))) {
 
             // Write header first
@@ -64,10 +58,8 @@ public class DataProcessingService {
                     "studentId", "firstName", "lastName", "DOB", "class", "score"
             });
 
-            // ------------------------------------------------
             // STEP 4: Use SAX streaming reader — reads row
             // by row without loading whole file into memory
-            // ------------------------------------------------
             try (OPCPackage opcPackage = OPCPackage.open(tempFile.toFile())) {
 
                 XSSFReader xssfReader = new XSSFReader(opcPackage);
@@ -100,18 +92,14 @@ public class DataProcessingService {
             }
         }
 
-        // ------------------------------------------------
         // STEP 5: Delete temp file
-        // ------------------------------------------------
         Files.deleteIfExists(tempFile);
         log.info("Temporary file deleted");
 
         return csvFilePath;
     }
 
-    // ================================================
     // INNER CLASS: Handles each row from the SAX reader
-    // ================================================
     private static class RowHandler implements SheetContentsHandler {
 
         private final CSVWriter csvWriter;
